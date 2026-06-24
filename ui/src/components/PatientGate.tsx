@@ -69,10 +69,12 @@ export function PatientGate({ onLogin, onRegister }: Props) {
     <div className="h-full flex items-center justify-center px-4">
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
-          <div className="mx-auto size-14 rounded-2xl bg-brand-500/15 border border-brand-500/40 flex items-center justify-center mb-3">
-            <HeartPulse size={26} className="text-brand-400" />
+          <div className="mx-auto size-16 rounded-[1.25rem] bg-indigo-500/15 border border-indigo-500/30 shadow-[0_0_30px_rgba(99,102,241,0.2)] flex items-center justify-center mb-4 overflow-hidden">
+            <img src="/image.png" alt="Nawaloka Logo" className="size-10 object-contain" />
           </div>
-          <h1 className="text-xl font-semibold text-slate-100">Nawaloka Health Assistant</h1>
+          <h1 className="text-2xl font-semibold text-slate-100">
+            <span className="bg-gradient-to-r from-indigo-400 to-purple-400 text-transparent bg-clip-text">Nawaloka</span> Health Assistant
+          </h1>
           <p className="text-sm text-slate-400 mt-1">
             Enter your phone number to continue. New patients can register.
           </p>

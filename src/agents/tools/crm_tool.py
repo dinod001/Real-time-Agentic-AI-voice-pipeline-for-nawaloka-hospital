@@ -63,6 +63,76 @@ class CRMTool:
     def _session(self):
         return sessionmaker(bind=self.engine, expire_on_commit=False)()
 
+    @staticmethod
+    def _fuzzy_best(name: str, candidates):
+        """Best fuzzy match for a (possibly STT-garbled) doctor name.
+
+        Voice STT mangles names — "Fernando"->"Fanandu", "Nirmala"->"Nirumala".
+        A plain substring match then fails even though the doctor exists. We
+        score each candidate by the MAX of (whole-string ratio, best
+        per-token ratio) so "Nirumala Fanandhu" still resolves to
+        "Dr. Nirmala Fernando". Returns ``(doctor, score)``.
+        """
+        import difflib, re
+        def norm(s: str) -> str:
+            s = re.sub(r"(?i)\b(dr|doctor|prof|mr|ms|mrs)\.?\b", " ", s or "")
+            return re.sub(r"[^a-z ]", " ", s.lower()).strip()
+        qn = norm(name)
+        if not qn:
+            return None, 0.0
+        q_tokens = [t for t in qn.split() if len(t) >= 3]
+        best, best_key = None, (0.0, 0.0)
+        for d in candidates:
+            cn = norm(getattr(d, "full_name", ""))
+            full = difflib.SequenceMatcher(None, qn, cn).ratio()
+            tok = 0.0
+            for qt in q_tokens:
+                for ct in cn.split():
+                    if len(ct) >= 3:
+                        tok = max(tok, difflib.SequenceMatcher(None, qt, ct).ratio())
+            score = max(full, tok)
+            # Primary: best token/string score. Tiebreaker: whole-name ratio,
+            # so "Nirmala Fanandhu" beats "Kusal Fernando" (both share the
+            # 'fernando' surname token) by the stronger overall match.
+            key = (score, full)
+            if key > best_key:
+                best, best_key = d, key
+        return best, best_key[0]
+
+    def _resolve_doctor(self, session, name, specialty=None, limit=5):
+        """Resolve a doctor by name — exact substring first, then a fuzzy
+        fallback so voice mis-hearings still find the real doctor. Returns a
+        list of Doctor (0, 1, or several for the caller to disambiguate)."""
+        base = (
+            session.query(Doctor)
+            .outerjoin(Specialty, Specialty.specialty_id == Doctor.specialty_id)
+            .filter(Doctor.active == 1)
+        )
+        if specialty:
+            base = base.filter(Specialty.name.ilike(f"%{specialty}%"))
+        exact = (
+            base.filter(Doctor.full_name.ilike(f"%{name}%"))
+            .order_by(Doctor.full_name).limit(limit).all()
+        )
+        if exact:
+            return exact
+        best, score = self._fuzzy_best(name, base.all())
+        return [best] if (best is not None and score >= 0.6) else []
+
+    def _resolve_specialty_name(self, session, specialty: str) -> str:
+        """Resolve a specialty name using fuzzy matching to correct typos and clean up extra words."""
+        if not specialty:
+            return ""
+        import difflib
+        import re
+        all_specs = [row[0] for row in session.query(Specialty.name).all() if row[0]]
+        lower_map = {s.lower(): s for s in all_specs}
+        clean_in = re.sub(r"(?i)\b(doctors?|department|specialists?)\b", "", specialty).strip().lower()
+        matches = difflib.get_close_matches(clean_in, list(lower_map.keys()), n=1, cutoff=0.5)
+        if matches:
+            return lower_map[matches[0]]
+        return clean_in
+
     def _epoch_to_local(self, epoch: int) -> str:
         """Format epoch as 'YYYY-MM-DD HH:MM' in the hospital timezone."""
         return datetime.fromtimestamp(epoch, self._tz).strftime("%Y-%m-%d %H:%M")
@@ -170,7 +240,8 @@ class CRMTool:
         if doctor_name:
             q = q.filter(Doctor.full_name.ilike(f"%{doctor_name}%"))
         if specialty:
-            q = q.filter(Specialty.name.ilike(f"%{specialty}%"))
+            resolved_spec = self._resolve_specialty_name(session, specialty)
+            q = q.filter(Specialty.name.ilike(f"%{resolved_spec}%"))
 
         status_lc = (status or "not_cancelled").lower()
         if status_lc == "active":
@@ -220,6 +291,35 @@ class CRMTool:
         return "\n".join(lines)
 
     # ─────────────────────────────────────────────────────────────
+    # Patient resolution — UUID or external_user_id (phone)
+    # ─────────────────────────────────────────────────────────────
+
+    def _resolve_patient(self, session, key: Optional[str]) -> Optional[Patient]:
+        """
+        Look up a Patient by either the canonical UUID
+        (``patients.patient_id``) or the phone-style
+        ``external_user_id`` that the orchestrator injects from
+        ``state["user_id"]``.
+
+        Returns the Patient row or ``None``. Callers should always
+        re-bind their local ``patient_id`` to ``patient.patient_id``
+        before passing it to downstream queries / inserts so foreign
+        keys land on the canonical UUID.
+        """
+        if not key:
+            return None
+        # 1) primary key (UUID)
+        patient = session.get(Patient, key)
+        if patient is not None:
+            return patient
+        # 2) external_user_id (phone) — what voice/text orchestrator pass
+        return (
+            session.query(Patient)
+            .filter(Patient.external_user_id == key)
+            .first()
+        )
+
+    # ─────────────────────────────────────────────────────────────
     # 1. lookup_patient — list/check appointments with filters
     # ─────────────────────────────────────────────────────────────
 
@@ -248,14 +348,12 @@ class CRMTool:
         """
         session = self._session()
         try:
-            # Resolve the patient — primary path is patient_id (injected).
-            patient: Optional[Patient] = None
-            if patient_id:
-                patient = session.get(Patient, patient_id)
+            # Resolve the patient — primary path is patient_id (injected
+            # by the orchestrator from session). May be a UUID or a phone.
+            patient: Optional[Patient] = self._resolve_patient(session, patient_id)
+            # Legacy fall-throughs (kept for direct API / test callers)
             if patient is None and external_user_id:
-                patient = session.query(Patient).filter(
-                    Patient.external_user_id == external_user_id
-                ).first()
+                patient = self._resolve_patient(session, external_user_id)
             if patient is None and phone:
                 patient = session.query(Patient).filter(
                     Patient.phone == phone
@@ -266,6 +364,8 @@ class CRMTool:
                 ).first()
             if patient is None:
                 return "No patient found."
+            # From here on, always use the canonical UUID.
+            patient_id = patient.patient_id
 
             window = self._date_window(start_date, end_date)
             start_epoch, end_epoch = (window if window else (None, None))
@@ -343,7 +443,8 @@ class CRMTool:
                 .filter(Doctor.active == 1)
             )
             if specialty:
-                q = q.filter(Specialty.name.ilike(f"%{specialty}%"))
+                resolved_spec = self._resolve_specialty_name(session, specialty)
+                q = q.filter(Specialty.name.ilike(f"%{resolved_spec}%"))
             name_filter = doctor_name or name
             if name_filter:
                 q = q.filter(Doctor.full_name.ilike(f"%{name_filter}%"))
@@ -366,6 +467,11 @@ class CRMTool:
             # "how many cardiologists" without enumerating all of them.
             total = q.with_entities(func.count(Doctor.doctor_id)).scalar() or 0
             doctors: List[Doctor] = q.order_by(Doctor.full_name).limit(20).all()
+            if total == 0 and name_filter and not location:
+                # Substring missed — fall back to fuzzy so voice mis-hearings
+                # ("Nirumala", "Fanandhu") still find the real doctor.
+                doctors = self._resolve_doctor(session, name_filter, specialty)
+                total = len(doctors)
             if total == 0:
                 applied = []
                 if specialty:    applied.append(f"specialty~'{specialty}'")
@@ -515,6 +621,16 @@ class CRMTool:
         """
         session = self._session()
         try:
+            # ── 0. Resolve patient ─────────────────────────────
+            patient: Optional[Patient] = self._resolve_patient(session, patient_id)
+            if patient is None:
+                return (
+                    f"Cannot book — no patient found with id/phone "
+                    f"'{patient_id}'. Please register the patient first."
+                )
+            # Always persist the canonical UUID in bookings.patient_id
+            patient_id = patient.patient_id
+
             # ── 1. Parse start time ────────────────────────────
             iso = start_at or start_time or new_start_time
             start_epoch = self._parse_iso_datetime(iso) if iso else None
@@ -538,15 +654,9 @@ class CRMTool:
             if doctor_id:
                 doctor = session.get(Doctor, doctor_id)
             elif doctor_name:
-                docs = (
-                    session.query(Doctor)
-                    .outerjoin(Specialty, Specialty.specialty_id == Doctor.specialty_id)
-                    .filter(Doctor.active == 1)
-                    .filter(Doctor.full_name.ilike(f"%{doctor_name}%"))
-                )
-                if specialty:
-                    docs = docs.filter(Specialty.name.ilike(f"%{specialty}%"))
-                doc_list = docs.order_by(Doctor.full_name).limit(5).all()
+                # Exact substring first, then fuzzy — so STT mis-hearings
+                # ("Nirumala Fanandhu") still resolve to the real doctor.
+                doc_list = self._resolve_doctor(session, doctor_name, specialty)
                 if not doc_list:
                     return (
                         f"No active doctor matching '{doctor_name}'"
@@ -568,11 +678,12 @@ class CRMTool:
                     )
                 doctor = doc_list[0]
             elif specialty:
+                resolved_spec = self._resolve_specialty_name(session, specialty)
                 doctor = (
                     session.query(Doctor)
                     .outerjoin(Specialty, Specialty.specialty_id == Doctor.specialty_id)
                     .filter(Doctor.active == 1)
-                    .filter(Specialty.name.ilike(f"%{specialty}%"))
+                    .filter(Specialty.name.ilike(f"%{resolved_spec}%"))
                     .order_by(Doctor.full_name)
                     .first()
                 )
@@ -699,15 +810,26 @@ class CRMTool:
         """
         session = self._session()
         try:
+            # Resolve patient_id (UUID or phone) up front so the ownership
+            # comparison below uses the canonical UUID.
+            if patient_id:
+                resolved = self._resolve_patient(session, patient_id)
+                if resolved is None:
+                    return (
+                        f"Cannot cancel — no patient with id/phone '{patient_id}'."
+                    )
+                patient_id = resolved.patient_id
+
             target: Optional[Booking] = None
 
             if booking_id:
                 target = session.get(Booking, booking_id)
-                if target is None:
-                    return f"Booking `{booking_id}` not found."
-                if patient_id and target.patient_id != patient_id:
+                if target is not None and patient_id and target.patient_id != patient_id:
                     return "That booking does not belong to the current patient."
-            else:
+                # A garbled / hallucinated id (common when the caller just says
+                # "cancel that" over voice) won't resolve. Rather than give up,
+                # fall through to finding the patient's own upcoming booking.
+            if target is None:
                 if not patient_id:
                     return "Cannot cancel — no patient context."
                 # If the user didn't specify a date window, default to
@@ -811,6 +933,16 @@ class CRMTool:
         """
         session = self._session()
         try:
+            # Resolve patient_id (UUID or phone) up front so the ownership
+            # comparison below uses the canonical UUID.
+            if patient_id:
+                resolved = self._resolve_patient(session, patient_id)
+                if resolved is None:
+                    return (
+                        f"Cannot reschedule — no patient with id/phone '{patient_id}'."
+                    )
+                patient_id = resolved.patient_id
+
             iso = new_start_at or new_start_time
             new_epoch = self._parse_iso_datetime(iso) if iso else None
             doctor_change_requested = bool(new_doctor_id or new_doctor_name)

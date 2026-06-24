@@ -14,6 +14,7 @@ Compatible with **livekit-agents >= 1.5.0**.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Optional
 
 from loguru import logger
@@ -54,24 +55,41 @@ async def _get_orchestrator() -> AgentOrchestrator:
         # off the event loop so we don't block other rooms during startup.
         _orchestrator = await asyncio.to_thread(build_agent)
         logger.success("LangGraph agent ready")
+        # Pre-warm the LLM HTTPS connection pool BEFORE the first user
+        # turn so call #1 doesn't pay TLS/DNS/HTTP setup latency on top
+        # of its real LLM round-trip.
+        await warm_start(_orchestrator)
     return _orchestrator
 
 
 async def warm_start(orchestrator: AgentOrchestrator) -> None:
-    """Throwaway ``achat`` call to prime LLM connection pools.
+    """Pre-warm the HTTPS connection pool to the fast LLM provider.
 
-    Eliminates the cold-start tax on the first real user turn.
+    The first call to Groq / OpenRouter / OpenAI from a fresh process
+    pays ~300-700 ms for DNS + TLS handshake + HTTP/2 setup. If the
+    first user turn pays that, perceived first-token latency on call
+    #1 is much worse than calls #2+. We fire a tiny ``ainvoke`` here
+    at worker boot so the pool is hot before any real call arrives.
+
+    We deliberately call ``llm_fast`` directly (not the full graph or
+    even ``achat_stream_fast``) — the goal is to warm the network
+    path, not exercise application logic.
     """
     try:
-        logger.debug("Warming agent (throwaway 'hello')...")
-        await orchestrator.achat(
-            user_message="hello",
-            user_id="__warmup__",
-            session_id="__warmup__",
+        from langchain_core.messages import HumanMessage
+        llm = orchestrator.llm_fast or orchestrator.llm_chat
+        t0 = time.perf_counter()
+        # ainvoke with `max_tokens=1` would be cheapest, but not all
+        # langchain_openai versions honour it via the constructor for
+        # post-hoc overrides. A 1-2 token reply works on all of them.
+        await llm.ainvoke(
+            [HumanMessage(content="hi")],
+            config={"tags": ["__warmup__"]},
         )
-        logger.debug("Warm-up done")
-    except Exception:
-        logger.warning("Warm-up failed (non-fatal)")
+        ms = int((time.perf_counter() - t0) * 1000)
+        logger.success(f"LLM connection warm — first call took {ms} ms")
+    except Exception as e:
+        logger.warning(f"Warm-up failed (non-fatal): {e}")
 
 
 # ── Voice agent builder ────────────────────────────────────────
@@ -187,6 +205,21 @@ async def create_and_start_agent(ctx: JobContext) -> AgentSession:
             on_agent_speech_started(session)
         elif new == "listening" and session.is_agent_speaking:
             on_agent_speech_finished(session)
+            # Publish per-turn latency telemetry to the browser HUD.
+            # Best-effort: never let a logging failure break the call.
+            try:
+                payload = getattr(agent, "_lg_adapter", None)
+                last = getattr(payload, "last_latency", None) if payload else None
+                if last:
+                    import json
+                    msg = json.dumps({"type": "latency", **last}).encode("utf-8")
+                    asyncio.create_task(
+                        ctx.room.local_participant.publish_data(
+                            msg, reliable=True, topic="latency"
+                        )
+                    )
+            except Exception as e:
+                logger.debug(f"publish latency failed (non-fatal): {e}")
 
     @agent_session.on("agent_false_interruption")
     def _on_false_interrupt(_ev):

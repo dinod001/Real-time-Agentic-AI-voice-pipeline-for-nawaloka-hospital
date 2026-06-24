@@ -1,0 +1,61 @@
+# =============================================================================
+# worker — Arq background worker (Backend Service, no public ingress)
+#
+# Reuses the same Dockerfile as `api`. CMD override below switches from
+# `uvicorn` to `arq workers.tasks.WorkerSettings`.
+#
+# Same CPU/memory profile as api because the worker builds the same
+# orchestrator on boot (Supabase + Qdrant + LLM clients) — these tasks
+# need to be able to call the orchestrator's tools.
+#
+# Healthcheck pings Redis from inside the container — proves both the
+# process is alive AND that the broker connection works.
+# =============================================================================
+
+name: worker
+type: Backend Service
+
+image:
+  # Reuses the api image (same code) — only the CMD differs.
+  location: 310485117018.dkr.ecr.us-west-2.amazonaws.com/nawaloka/worker:latest
+  # No port — the worker has no HTTP surface. Talks Redis only.
+  healthcheck:
+    command:
+      - "CMD-SHELL"
+      - "python -c 'import os,redis; redis.from_url(os.environ[\"REDIS_URL\"]).ping()' || exit 1"
+    interval: 30s
+    retries: 3
+    timeout: 10s
+    start_period: 2m       # boot includes orchestrator wiring (Supabase + Qdrant)
+
+# Override the api image CMD — run arq instead of uvicorn.
+command: ["arq", "workers.tasks.WorkerSettings"]
+
+cpu: 512
+memory: 1024
+platform: linux/arm64
+count: 1
+exec: true
+network:
+  connect: true
+  vpc:
+    placement: public
+
+variables:
+  REDIS_URL: redis://nawaloka-dev.dahd4w.0001.usw2.cache.amazonaws.com:6379/0
+  LOG_LEVEL: info
+  TIMEZONE: Asia/Colombo
+
+secrets:
+  SUPABASE_DB_URL:        /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/SUPABASE_DB_URL
+  SUPABASE_URL:           /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/SUPABASE_URL
+  SUPABASE_SERVICE_KEY:   /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/SUPABASE_SERVICE_KEY
+  QDRANT_URL:             /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/QDRANT_URL
+  QDRANT_API_KEY:         /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/QDRANT_API_KEY
+  GROQ_API_KEY:           /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/GROQ_API_KEY
+  OPENROUTER_API_KEY:     /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/OPENROUTER_API_KEY
+  OPENAI_API_KEY:         /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/OPENAI_API_KEY
+  ANTHROPIC_API_KEY:      /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/ANTHROPIC_API_KEY
+  LANGFUSE_PUBLIC_KEY:    /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/LANGFUSE_PUBLIC_KEY
+  LANGFUSE_SECRET_KEY:    /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/LANGFUSE_SECRET_KEY
+  LANGFUSE_BASE_URL:      /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/LANGFUSE_BASE_URL

@@ -37,7 +37,7 @@ def _load_yaml(filename: str) -> Dict[str, Any]:
     filepath = _CONFIG_DIR / filename
     if not filepath.exists():
         return {}
-    with open(filepath, "r") as f:
+    with open(filepath, "r",encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 
@@ -110,15 +110,25 @@ def get_embedding_model(provider: Optional[str] = None, tier: Optional[str] = No
 # is materially better at picking up self-referential intent like
 # "do I have an appointment today" → crm. The 8B model was misrouting
 # these to "direct".
-ROUTER_MODEL = "llama-3.3-70b-versatile"
-ROUTER_PROVIDER = "groq"
+# ROUTER_MODEL = "llama-3.3-70b-versatile"
+# ROUTER_PROVIDER = "groq"
 
-EXTRACTOR_MODEL = "llama-3.1-8b-instant"
-EXTRACTOR_PROVIDER = "groq"
+# EXTRACTOR_MODEL = "llama-3.1-8b-instant"
+# EXTRACTOR_PROVIDER = "groq"
+# GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+
+# CHAT_MODEL = "google/gemini-2.5-flash"
+# CHAT_PROVIDER = "openrouter"
+
+ROUTER_MODEL = "gpt-4o-mini"
+ROUTER_PROVIDER = "openai"
+
+EXTRACTOR_MODEL = "gpt-4o-mini"
+EXTRACTOR_PROVIDER = "openai"
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
-CHAT_MODEL = "google/gemini-2.5-flash"
-CHAT_PROVIDER = "openrouter"
+CHAT_MODEL = "gpt-4o-mini"
+CHAT_PROVIDER = "openai"
 
 # Fast LLM for the "direct" route (greetings/concierge).
 # llama-3.3-70b-versatile on Groq:
@@ -126,8 +136,11 @@ CHAT_PROVIDER = "openrouter"
 #     hallucinations like the 8B model produced
 #   - LPU hardware → ~500-800ms TTFT, ~200 tok/s sustained
 #   - Same provider as the router (Groq), no proxy hop
-FAST_CHAT_MODEL = "llama-3.3-70b-versatile"
-FAST_CHAT_PROVIDER = "groq"
+# FAST_CHAT_MODEL = "llama-3.3-70b-versatile"
+# FAST_CHAT_PROVIDER = "groq"
+
+FAST_CHAT_MODEL = "gpt-4o-mini"
+FAST_CHAT_PROVIDER = "openai"
 
 EMBEDDING_MODEL = get_embedding_model()
 

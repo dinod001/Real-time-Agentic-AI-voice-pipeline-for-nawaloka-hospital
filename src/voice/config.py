@@ -43,9 +43,14 @@ class VoiceConfig:
     tts_voice_id: str = "l7kNoIfnJKPg7779LI2t"   # ElevenLabs "Aria" (default)
 
     # VAD + EOU policy
+    # Tuned for snappy voice turn-taking. silence_threshold_ms is how
+    # long Silero waits before declaring speech ended; min_endpointing
+    # _delay is the extra buffer LiveKit waits before handing the
+    # transcript to the LLM. Lower = faster turn-taking but more false
+    # interruptions on hesitant speech.
     vad_threshold: float = 0.5
-    silence_threshold_ms: int = 500
-    min_endpointing_delay: float = 0.5
+    silence_threshold_ms: int = 300
+    min_endpointing_delay: float = 0.3
 
     # Pipeline behaviour
     interruption_enabled: bool = True

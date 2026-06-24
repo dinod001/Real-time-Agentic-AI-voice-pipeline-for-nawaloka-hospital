@@ -240,6 +240,15 @@ class QueryRouter:
 
         for rd in route_dicts:
             route = rd.get("route", "direct")
+            action = rd.get("action")
+            
+            # Handle "crm/search_doctors" emitted by LLM due to prompt wording
+            if "/" in route:
+                parts = route.split("/", 1)
+                route = parts[0]
+                if not action and len(parts) > 1:
+                    action = parts[1]
+
             if route not in VALID_ROUTES:
                 logger.warning("Invalid route '{}'; skipping.", route)
                 continue
@@ -248,7 +257,6 @@ class QueryRouter:
                 continue
             seen_routes.add(route)
 
-            action = rd.get("action")
             if route == "crm" and action not in VALID_CRM_ACTIONS:
                 logger.warning(
                     "Invalid CRM action '{}'; defaulting to lookup_patient.", action

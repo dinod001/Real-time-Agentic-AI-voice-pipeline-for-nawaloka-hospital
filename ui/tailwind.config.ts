@@ -7,21 +7,21 @@ export default {
     extend: {
       colors: {
         bg: {
-          DEFAULT: "#0b0f17",
-          soft: "#111827",
-          card: "#161f2e",
+          DEFAULT: "#060818",
+          soft: "#0c0e1e",
+          card: "#141628",
         },
         border: {
-          DEFAULT: "#1f2937",
-          strong: "#374151",
+          DEFAULT: "rgba(255, 255, 255, 0.08)",
+          strong: "rgba(255, 255, 255, 0.15)",
         },
         brand: {
-          DEFAULT: "#22d3ee",
-          50: "#ecfeff",
-          100: "#cffafe",
-          400: "#22d3ee",
-          500: "#06b6d4",
-          600: "#0891b2",
+          DEFAULT: "#6366f1",
+          50: "#eef2ff",
+          100: "#e0e7ff",
+          400: "#818cf8",
+          500: "#6366f1", // Indigo 500
+          600: "#4f46e5",
         },
         success: "#10b981",
         warn: "#f59e0b",

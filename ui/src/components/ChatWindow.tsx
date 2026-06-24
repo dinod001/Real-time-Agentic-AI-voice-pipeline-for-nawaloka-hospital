@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Sparkles } from "lucide-react";
+import { Sparkles, Clock, CalendarDays, FileText, User, ChevronRight } from "lucide-react";
 import type { UIMessage } from "@/types";
 import type { ThoughtItem } from "@/hooks/useChatStream";
 import { ChainOfThought } from "./ChainOfThought";
@@ -45,34 +45,43 @@ export function ChatWindow({ messages, loading, thoughts, error }: Props) {
 }
 
 function EmptyState() {
-  // Generic starter questions — kept neutral and broadly useful so
-  // they don't mislead about the assistant's scope or look like
-  // role-play prompts. One per route family: CRM, RAG/CAG, CRM-list,
-  // RAG-clinical.
   const samples = [
-    "What are the opening hours of the hospital?",
-    "Do I have any appointments this week?",
-    "What should I bring for my first appointment?",
-    "Show me all the dermatology consultants.",
+    { text: "What are the opening hours of the hospital?", icon: Clock, color: "text-indigo-400", bg: "bg-indigo-500/15" },
+    { text: "Do I have any appointments this week?", icon: CalendarDays, color: "text-teal-400", bg: "bg-teal-500/15" },
+    { text: "What should I bring for my first appointment?", icon: FileText, color: "text-amber-400", bg: "bg-amber-500/15" },
+    { text: "Show me all the dermatology consultants.", icon: User, color: "text-blue-400", bg: "bg-blue-500/15" },
   ];
+
   return (
-    <div className="max-w-2xl mx-auto text-center py-12 space-y-6 animate-fade-in">
-      <div className="inline-flex items-center justify-center size-14 rounded-2xl bg-brand-500/10 border border-brand-500/30">
-        <Sparkles className="text-brand-400" size={26} />
+    <div className="max-w-3xl mx-auto text-center py-12 space-y-6 animate-fade-in flex flex-col items-center">
+      <div className="inline-flex items-center justify-center size-14 rounded-full bg-indigo-500/15 border border-indigo-500/30 shadow-[0_0_30px_rgba(99,102,241,0.2)] overflow-hidden">
+        <img src="/image.png" alt="Nawaloka Logo" className="size-8 object-contain" />
       </div>
       <div>
-        <h2 className="text-xl font-semibold text-slate-100">Nawaloka Health Assistant</h2>
-        <p className="text-sm text-slate-400 mt-1">
-          Ask about appointments, doctors, policies, or procedures. The agent routes your query across
-          a CRM, internal KB (RAG), semantic cache (CAG), and live web search.
+        <h2 className="text-2xl font-semibold text-slate-100">
+          <span className="bg-gradient-to-r from-indigo-400 to-purple-400 text-transparent bg-clip-text">Nawaloka</span> Health Assistant
+        </h2>
+        <p className="text-sm text-slate-400 mt-2 max-w-lg mx-auto leading-relaxed">
+          Ask about appointments, doctors, policies, or procedures.<br />
+          The agent routes your query across a CRM, internal KB (RAG),<br />
+          semantic cache (CAG), and live web search.
         </p>
       </div>
-      <div className="grid sm:grid-cols-2 gap-2 text-left">
-        {samples.map((s) => (
-          <div key={s} className="card px-3 py-2 text-sm text-slate-300">
-            {s}
-          </div>
-        ))}
+      <div className="grid sm:grid-cols-2 gap-4 text-left mt-8 w-full">
+        {samples.map((s) => {
+          const Icon = s.icon;
+          return (
+            <div key={s.text} className="card flex items-center gap-4 p-4 cursor-pointer hover:bg-bg-card transition-colors group border-white/5">
+              <div className={`shrink-0 flex items-center justify-center size-10 rounded-full ${s.bg}`}>
+                <Icon className={s.color} size={18} />
+              </div>
+              <div className="flex-1 text-sm font-medium text-slate-300">
+                {s.text}
+              </div>
+              <ChevronRight className="text-slate-600 group-hover:text-slate-400 transition-colors shrink-0" size={18} />
+            </div>
+          );
+        })}
       </div>
     </div>
   );

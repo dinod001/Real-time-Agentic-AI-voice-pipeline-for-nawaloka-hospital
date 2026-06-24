@@ -1,6 +1,17 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import clsx from "clsx";
-import { LogOut, MessageSquare, Plus, Settings, Trash2, User, Wrench } from "lucide-react";
+import {
+  Heart,
+  LogOut,
+  MessageSquare,
+  Mic,
+  Plus,
+  RefreshCw,
+  Settings,
+  Trash2,
+  User,
+  Wrench,
+} from "lucide-react";
 import type { SessionMeta } from "@/hooks/useSessions";
 import type { Patient } from "@/types";
 import { ToolExplorer } from "./ToolExplorer";
@@ -15,7 +26,12 @@ interface Props {
   onLogout: () => void;
   onOpenProfile: () => void;
   activeSessionId: string;
+  onResync: () => void;
+  syncing: boolean;
+  syncMsg: string | null;
 }
+
+const isVoiceSession = (s: SessionMeta) => s.session_id.startsWith("voice-");
 
 export function Sidebar({
   sessions,
@@ -27,16 +43,28 @@ export function Sidebar({
   onLogout,
   onOpenProfile,
   activeSessionId,
+  onResync,
+  syncing,
+  syncMsg,
 }: Props) {
   const [tab, setTab] = useState<"sessions" | "tools">("sessions");
+
+  // Split into voice + chat. Both lists share the backend's newest-first
+  // ordering — we just partition by the `voice-` prefix on session_id.
+  const { voiceSessions, chatSessions } = useMemo(() => {
+    const v: SessionMeta[] = [];
+    const c: SessionMeta[] = [];
+    for (const s of sessions) (isVoiceSession(s) ? v : c).push(s);
+    return { voiceSessions: v, chatSessions: c };
+  }, [sessions]);
 
   return (
     <aside className="w-72 shrink-0 border-r border-border bg-bg-soft flex flex-col">
       {/* ── Patient identity card ──────────────────────────────────── */}
       <div className="p-3 border-b border-border">
-        <div className="card p-2.5 flex items-center gap-2.5">
-          <div className="size-9 rounded-full bg-brand-500/15 border border-brand-500/40 flex items-center justify-center text-brand-400">
-            <User size={15} />
+        <div className="card p-2.5 flex items-center gap-3">
+          <div className="size-10 rounded-full bg-indigo-600 flex items-center justify-center text-white font-semibold shrink-0">
+            {patient.full_name.charAt(0).toUpperCase()}
           </div>
           <div className="flex-1 min-w-0">
             <div className="text-sm text-slate-100 truncate font-medium">{patient.full_name}</div>
@@ -65,56 +93,190 @@ export function Sidebar({
 
       {/* ── Tab switcher ───────────────────────────────────────────── */}
       <div className="flex text-xs border-b border-border">
-        <TabButton active={tab === "sessions"} icon={<MessageSquare size={12} />} onClick={() => setTab("sessions")}>
+        <TabButton
+          active={tab === "sessions"}
+          icon={<MessageSquare size={12} />}
+          onClick={() => setTab("sessions")}
+        >
           Sessions
         </TabButton>
-        <TabButton active={tab === "tools"} icon={<Wrench size={12} />} onClick={() => setTab("tools")}>
+        <TabButton
+          active={tab === "tools"}
+          icon={<Wrench size={12} />}
+          onClick={() => setTab("tools")}
+        >
           Tools
         </TabButton>
       </div>
 
       {/* ── Tab body ───────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-2">
-        {tab === "sessions" ? (
-          <>
-            <button type="button" className="btn-primary w-full" onClick={onCreate}>
-              <Plus size={14} /> New conversation
+      {tab === "sessions" ? (
+        <div className="flex-1 flex flex-col min-h-0">
+          {/* Resync — manually pull conversations from the database. The
+              fix for a sidebar that looks empty even though the server has
+              the data: forces a fresh, uncached fetch and shows the result. */}
+          <div className="px-3 pt-2 pb-2 border-b border-border">
+            <button
+              type="button"
+              onClick={onResync}
+              disabled={syncing}
+              className="w-full flex items-center justify-center gap-1.5 text-[11px] py-1.5 rounded-md border border-border text-slate-300 hover:bg-bg-card disabled:opacity-60"
+              title="Pull all conversations fresh from the database"
+            >
+              <RefreshCw size={12} className={clsx(syncing && "animate-spin")} />
+              {syncing ? "Syncing…" : "Resync conversations"}
             </button>
-            {sessions.map((s) => (
+            {syncMsg && (
               <div
-                key={s.session_id}
                 className={clsx(
-                  "group flex items-center gap-2 px-2 py-1.5 rounded-lg border cursor-pointer",
-                  s.session_id === activeId
-                    ? "bg-bg-card border-brand-500/40"
-                    : "border-transparent hover:bg-bg-card/60",
+                  "text-[10px] mt-1.5 px-0.5 leading-snug",
+                  syncMsg.startsWith("Sync failed") ? "text-danger" : "text-slate-500",
                 )}
-                onClick={() => onSelect(s.session_id)}
               >
-                <MessageSquare size={13} className="shrink-0 text-slate-500" />
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm truncate text-slate-200">{s.title}</div>
-                  <div className="text-[10px] text-slate-500 truncate">{s.session_id}</div>
-                </div>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (confirm(`Delete "${s.title}"?`)) onDelete(s.session_id);
-                  }}
-                  className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-danger p-1"
-                  aria-label="Delete session"
-                >
-                  <Trash2 size={13} />
-                </button>
+                {syncMsg}
               </div>
-            ))}
-          </>
-        ) : (
+            )}
+          </div>
+
+          {/* Voice half (top) */}
+          <SessionList
+            title="Voice"
+            headerIcon={<Mic size={11} className="text-emerald-400" />}
+            sessions={voiceSessions}
+            activeId={activeId}
+            onSelect={onSelect}
+            onDelete={onDelete}
+            emptyHint="Calls you make from the Voice button appear here."
+            rowIcon={(s) => (
+              <Mic
+                size={13}
+                className={clsx(
+                  "shrink-0",
+                  s.session_id === activeId ? "text-emerald-400" : "text-slate-500",
+                )}
+              />
+            )}
+          />
+
+          {/* Divider */}
+          <div className="border-t border-border" />
+
+          {/* Chat half (bottom) */}
+          <SessionList
+            title="Chat"
+            headerIcon={<MessageSquare size={11} className="text-brand-400" />}
+            sessions={chatSessions}
+            activeId={activeId}
+            onSelect={onSelect}
+            onDelete={onDelete}
+            emptyHint="No chat sessions yet."
+            rowIcon={() => <MessageSquare size={13} className="shrink-0 text-slate-500" />}
+            headerAction={
+              <button
+                type="button"
+                onClick={onCreate}
+                className="text-[11px] text-brand-400 hover:text-brand-300 flex items-center gap-1"
+                title="New chat conversation"
+              >
+                <Plus size={12} /> New
+              </button>
+            }
+          />
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto p-3 space-y-2">
           <ToolExplorer userId={patient.patient_id} sessionId={activeSessionId} />
-        )}
+        </div>
+      )}
+
+      {/* ── Sidebar footer — branding tagline ──────────────────────── */}
+      <div className="shrink-0 border-t border-border p-4">
+        <div className="flex flex-col items-center text-center gap-1">
+          <img 
+            src="/heart_hands.png" 
+            alt="Care" 
+            className="h-16 w-auto object-contain drop-shadow-[0_0_15px_rgba(99,102,241,0.2)]" 
+          />
+          <div className="text-[11px] text-slate-400 leading-relaxed mt-1">
+            Your health. Your assistant.<br />Here to help, anytime.
+          </div>
+        </div>
       </div>
     </aside>
+  );
+}
+
+// ── Per-half list ────────────────────────────────────────────────────
+
+interface ListProps {
+  title: string;
+  headerIcon: React.ReactNode;
+  sessions: SessionMeta[];
+  activeId: string;
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
+  emptyHint: string;
+  rowIcon: (s: SessionMeta) => React.ReactNode;
+  headerAction?: React.ReactNode;
+}
+
+function SessionList({
+  title,
+  headerIcon,
+  sessions,
+  activeId,
+  onSelect,
+  onDelete,
+  emptyHint,
+  rowIcon,
+  headerAction,
+}: ListProps) {
+  return (
+    <div className="flex-1 min-h-0 flex flex-col">
+      <div className="px-3 pt-2 pb-1 flex items-center justify-between">
+        <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-slate-400 font-medium">
+          {headerIcon}
+          <span>{title}</span>
+          <span className="text-slate-600 normal-case tracking-normal">({sessions.length})</span>
+        </div>
+        {headerAction}
+      </div>
+      <div className="flex-1 overflow-y-auto px-3 pb-2 space-y-1">
+        {sessions.length === 0 ? (
+          <div className="text-[11px] text-slate-500 italic px-1 py-1">{emptyHint}</div>
+        ) : (
+          sessions.map((s) => (
+            <div
+              key={s.session_id}
+              className={clsx(
+                "group flex items-center gap-2 px-2 py-1.5 rounded-lg border cursor-pointer",
+                s.session_id === activeId
+                  ? "bg-bg-card border-brand-500/40"
+                  : "border-transparent hover:bg-bg-card/60",
+              )}
+              onClick={() => onSelect(s.session_id)}
+            >
+              {rowIcon(s)}
+              <div className="flex-1 min-w-0">
+                <div className="text-sm truncate text-slate-200">{s.title}</div>
+                <div className="text-[10px] text-slate-500 truncate">{s.session_id}</div>
+              </div>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (confirm(`Delete "${s.title}"?`)) onDelete(s.session_id);
+                }}
+                className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-danger p-1"
+                aria-label="Delete session"
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
   );
 }
 

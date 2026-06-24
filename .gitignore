@@ -1,83 +1,98 @@
-# Python
+# ── Secrets — NEVER COMMIT ─────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+.env.production
+*.pem
+*.key
+credentials.json
+service-account*.json
+.aws/
+
+# ── Python ─────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# Virtual Environments
+.venv/
 venv/
-ENV/
 env/
-.venv
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Jupyter Notebook
-.ipynb_checkpoints
-*.ipynb_checkpoints/
-
-# Environment Variables (CRITICAL - NEVER COMMIT)
-.env
-.env.local
-.env.*.local
-.env.docker
-
-# Data and Model Files
-data/
-*.pkl
-*.h5
-*.pt
-*.pth
-models/
-checkpoints/
-
-# Vector Store
-vectorstore/
-*.db
-*.sqlite
-
-# Logs
-*.log
-logs/
-
-# Coverage and Testing
-.coverage
+ENV/
 .pytest_cache/
-htmlcov/
-
-# Type Checking
 .mypy_cache/
-.dmypy.json
-dmypy.json
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+.ipynb_checkpoints/
 
-# Documentation
-docs/_build/
+# ── Node / UI ──────────────────────────────────────────────────────
+ui/node_modules/
+ui/dist/
+ui/.vite/
+ui/.next/
+**/node_modules/
+**/dist/
+*.tsbuildinfo
 
-# OS
+# ── Docker / build artefacts ───────────────────────────────────────
+*.tar
+*.tar.gz
+.docker/
+hf_cache/
+
+# ── OS / Editor ────────────────────────────────────────────────────
+.DS_Store
 Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
 
+# ── Word/Office lock files ─────────────────────────────────────────
+~$*
+
+# ── Large generated artefacts not needed in git ───────────────────
+*.mp3
+*.wav
+session-export-*.zip
+tmp_*.mp3
+
+# ── Generated / instructor-only docs (NOT for student distribution) ───────
+docs/*.docx
+# Keep only the two student-facing docs:
+!docs/AWS_From_Zero_Account_and_IAM_Setup.docx
+!docs/Nawaloka_Cloud_Services_Cost_and_Decisions.docx
+# Instructor-only material + ad-hoc generators (kept locally, never shared):
+docs/week-15-16-deck.md
+docs/_build_*.js
+docs/_md_to_docx.py
+scripts/build_guidelines.py
+# Instructor teaching guides (role-play scripts) — never share with students:
+docs/*teacher-guide*
+docs/*teacher_guide*
+
+# ── Slide PDF — too big for git, distribute separately ────────────
+Weeks_15*.pdf
+
+# ── Local data / scratch ──────────────────────────────────────────
+data/*
+!data/.gitkeep
+# Ship the RAG knowledge base (students ingest it into Qdrant); keep other
+# data/ contents (scratch, generated dumps) ignored.
+!data/knowledge_base/
+!data/knowledge_base/**
+logs/
+*.log
+
+# ── AWS Copilot generated state ───────────────────────────────────
+# (manifests under copilot/ ARE tracked — they're infra-as-code)
+copilot/.workspace
+copilot/**/addons/.cfn
+
+# ── Notebook outputs (we'll commit clean notebooks) ───────────────
+# Uncomment if you want to strip outputs:
+# notebooks/*.ipynb

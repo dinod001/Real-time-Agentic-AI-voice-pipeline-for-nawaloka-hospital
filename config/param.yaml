@@ -157,16 +157,22 @@ voice:
 
   # ── TTS: ElevenLabs Turbo v2.5 (premium voices, ~250ms TTFB) ──────────
   # Switch to "deepgram" + tts_model "aura-2-andromeda-en" to use Deepgram TTS instead.
-  tts_provider: elevenlabs
-  tts_model: eleven_turbo_v2_5         # low-latency model — recommended for voice agents
-  tts_voice_id: l7kNoIfnJKPg7779LI2t   # "Aria" (ElevenLabs default). Browse voices at
+  # tts_provider: elevenlabs
+  # tts_model: eleven_turbo_v2_5         # low-latency model — recommended for voice agents
+  # tts_voice_id: l7kNoIfnJKPg7779LI2t   # "Aria" (ElevenLabs default). Browse voices at
                                        # https://elevenlabs.io/app/voice-library — paste the voice
                                        # ID here to swap. Premium-only voices work with a paid key.
-
+  tts_provider: deepgram
+  tts_model: aura-2-andromeda-en 
   # ── VAD + EOU policy ──────────────────────────────────────────────────
+  # Tuned for snappy turn-taking. Combined endpoint =
+  #   silence_threshold_ms + min_endpointing_delay
+  # 500ms + 500ms was eating an entire SECOND on every turn before the
+  # LLM call could even start. 300ms + 300ms feels responsive without
+  # false interruptions on hesitant speech.
   vad_threshold: 0.5                   # Silero P(speech) cutoff
-  silence_threshold_ms: 500            # Silence before end-of-turn (Layer 2 of EOU)
-  min_endpointing_delay: 0.5           # Confirmation buffer in seconds (Layer 3)
+  silence_threshold_ms: 300            # Silence before end-of-turn (Layer 2 of EOU)
+  min_endpointing_delay: 0.3           # Confirmation buffer in seconds (Layer 3)
   interruption_enabled: true           # Allow user to barge in
   sample_rate: 16000                   # Both Deepgram + Silero want 16 kHz mono
 

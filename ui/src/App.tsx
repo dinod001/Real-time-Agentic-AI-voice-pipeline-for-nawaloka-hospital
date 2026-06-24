@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { HeartPulse } from "lucide-react";
+import { HeartPulse, Phone, X } from "lucide-react";
 import { sessionApi } from "@/api/client";
 import { ChatWindow } from "@/components/ChatWindow";
 import { InputBox } from "@/components/InputBox";
@@ -7,6 +7,7 @@ import { PatientGate } from "@/components/PatientGate";
 import { ProfileSheet } from "@/components/ProfileSheet";
 import { Sidebar } from "@/components/Sidebar";
 import { StatusBar } from "@/components/StatusBar";
+import { VoiceRoom } from "@/components/VoiceRoom";
 import { useChatStream } from "@/hooks/useChatStream";
 import { useHealth } from "@/hooks/useHealth";
 import { usePatient } from "@/hooks/usePatient";
@@ -17,6 +18,7 @@ export default function App() {
   const patient = usePatient();
   const sessions = useSessions(patient.patient?.patient_id);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [voiceOpen, setVoiceOpen] = useState(false);
 
   // ── Session warmup ──────────────────────────────────────────────
   // The moment we know who the user is and which conversation they're
@@ -35,6 +37,31 @@ export default function App() {
   const userId = patient.patient ? patient.patient.patient_id : "";
   const chat = useChatStream({ userId, sessionId: sessions.activeId });
   const activeSession = sessions.sessions.find((s) => s.session_id === sessions.activeId);
+
+  // ── Voice ↔ Sidebar sync ─────────────────────────────────────────
+  // A voice call writes a new `voice-<room>` row to chat_sessions
+  // (and may LLM-rename it after a couple of turns). Poll the
+  // sessions list while the voice modal is open so the new row + the
+  // updated title appear in the sidebar without a manual refresh.
+  useEffect(() => {
+    if (!voiceOpen) return;
+    const id = window.setInterval(() => {
+      void sessions.refresh();
+    }, 4000);
+    return () => window.clearInterval(id);
+  }, [voiceOpen, sessions.refresh]);
+
+  // After the chat path posts a turn, the backend schedules the
+  // auto-title in the background. Refresh once a few seconds after
+  // each completed message so the new title shows up.
+  useEffect(() => {
+    if (chat.loading) return;
+    if (chat.messages.length < 2) return;
+    const id = window.setTimeout(() => {
+      void sessions.refresh();
+    }, 3500);
+    return () => window.clearTimeout(id);
+  }, [chat.loading, chat.messages.length, sessions.refresh]);
 
   // ── Loading splash while we hydrate localStorage on first paint ──
   if (!patient.loaded) {
@@ -55,8 +82,8 @@ export default function App() {
     <div className="h-full flex flex-col">
       {/* ── Top bar ─────────────────────────────────────────────── */}
       <header className="shrink-0 h-14 border-b border-border flex items-center gap-3 px-4 bg-bg-soft">
-        <div className="size-8 rounded-lg bg-brand-500/15 border border-brand-500/40 flex items-center justify-center">
-          <HeartPulse size={16} className="text-brand-400" />
+        <div className="size-8 rounded-lg bg-indigo-500/15 border border-indigo-500/40 flex items-center justify-center overflow-hidden">
+          <img src="/image.png" alt="Logo" className="size-5 object-contain" />
         </div>
         <div className="flex-1 min-w-0">
           <h1 className="text-sm font-semibold text-slate-100 truncate">
@@ -66,6 +93,14 @@ export default function App() {
             {activeSession?.title ?? sessions.activeId}
           </div>
         </div>
+        <button
+          onClick={() => setVoiceOpen(true)}
+          className="flex items-center gap-2 px-3 h-9 rounded-full bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25 transition text-xs font-medium"
+          title="Talk to the assistant"
+        >
+          <Phone size={14} />
+          Voice
+        </button>
         <StatusBar status={health.status} readiness={health.readiness} config={health.config} />
       </header>
 
@@ -81,6 +116,9 @@ export default function App() {
           onLogout={patient.logout}
           onOpenProfile={() => setProfileOpen(true)}
           activeSessionId={sessions.activeId}
+          onResync={() => sessions.refresh(true)}
+          syncing={sessions.syncing}
+          syncMsg={sessions.syncMsg}
         />
 
         <main className="flex-1 flex flex-col min-w-0">
@@ -117,6 +155,28 @@ export default function App() {
           </div>
         </main>
       </div>
+
+      {/* ── Voice modal ─────────────────────────────────────────── */}
+      {voiceOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center">
+          <button
+            onClick={() => setVoiceOpen(false)}
+            className="absolute top-4 right-4 p-2 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-200"
+            title="Close"
+          >
+            <X size={18} />
+          </button>
+          <VoiceRoom
+            userId={userId}
+            onClose={() => {
+              setVoiceOpen(false);
+              // Immediate refresh — picks up the new voice-<room> row
+              // in the sidebar without waiting for the next poll tick.
+              void sessions.refresh();
+            }}
+          />
+        </div>
+      )}
 
       {/* ── Profile slide-over ──────────────────────────────────── */}
       <ProfileSheet

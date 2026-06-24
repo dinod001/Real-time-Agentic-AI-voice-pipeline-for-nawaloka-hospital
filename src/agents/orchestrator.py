@@ -307,7 +307,17 @@ class AgentOrchestrator:
             state.get("route_decision", {})
         )
         action = crm_decision.get("action", "lookup_patient")
-        params = crm_decision.get("params", {})
+        params = dict(crm_decision.get("params") or {})
+
+        # Auto-inject patient_id from session — the router prompt explicitly
+        # tells the LLM NOT to fill this in ("auto-injected downstream"), so
+        # the orchestrator must do it before dispatch. ``dispatch`` filters
+        # out kwargs the handler doesn't accept, so injecting universally is
+        # safe: it lands on lookup_patient / create_booking / cancel_booking
+        # / reschedule_booking, and is silently dropped for search_doctors,
+        # list_specialties, etc.
+        if "patient_id" not in params and state.get("user_id"):
+            params["patient_id"] = state["user_id"]
 
         system_prompt = build_admin_agent_prompt()
 
@@ -565,6 +575,511 @@ class AgentOrchestrator:
             tool_output=final_state.get("tool_output", ""),
             memory_context=final_state.get("memory_context", ""),
             latency_ms=latency
+        )
+
+    # ── Voice Fast Path ────────────────────────────────────────
+    #
+    # Bypass the multi-agent graph entirely and stream tokens from a
+    # single fast-LLM call. This is the right shape for realtime voice:
+    # the full graph (router LLM → parallel agents → merge LLM) makes
+    # 3+ sequential LLM calls before any audio plays. For phone-call
+    # style turns the user can't see citations or rich tool output
+    # anyway, so the multi-agent richness is mostly wasted.
+    #
+    # Latency budget after this change:
+    #   STT first-final (~200-400ms) + LLM first token (~300-500ms)
+    #   + TTS first audio (~200-400ms)  ≈  700-1300ms perceived.
+    #
+    # Memory writes happen in the background after streaming ends —
+    # they don't block the user-perceived latency.
+
+    # NOTE: deliberately NOT decorated with @observe.
+    # Langfuse v4's @observe doesn't cleanly handle async generators in
+    # all versions — it can buffer yields until the function returns,
+    # which would *single-handedly* fake-disable streaming and explain
+    # multi-second first-token latencies even when the LLM itself is
+    # streaming fine. The adapter (voice/adapter.py) opens a manual
+    # Langfuse span around the consumption of this generator instead,
+    # which is the safe pattern for streaming functions.
+    async def achat_stream_fast(
+        self,
+        user_message: str,
+        user_id: str,
+        session_id: str,
+    ):
+        """Single-LLM streaming path for voice. Yields:
+
+            ("token",   str)             — speakable text chunk
+            ("partial", str)              — running concatenation, sent
+                                           after each token so the
+                                           caller can record what was
+                                           ACTUALLY emitted in case of
+                                           barge-in cancellation
+            ("final",   AgentResponse)    — emitted once, after the last
+                                           token
+
+        On barge-in (`asyncio.CancelledError`), the generator terminates
+        without ever yielding "final". Callers MUST treat the last
+        "partial" they received as the truth of what was said. See
+        voice/adapter.py for how this is wired into LiveKit.
+        """
+        import asyncio as _asyncio
+        from langchain_core.messages import SystemMessage, HumanMessage
+
+        t_start = time.perf_counter()
+
+        # ── 1) Memory fetch — INSTANT from the per-call in-memory cache ──
+        # The voice worker can be far from Supabase (200-1500ms per fetch).
+        # Fetching every turn made replies take 10-15s. Instead we keep a tiny
+        # per-call context cache (filled by `_save_voice_turn_async` after each
+        # turn): reading it is instant, so turns 2+ have memory with ZERO DB
+        # latency. We only touch the DB on the FIRST turn (cache cold), with a
+        # tight cap so a slow/distant DB can't stall the opening reply either.
+        memory_context = ""
+        t_mem_start = time.perf_counter()
+        cache = getattr(self, "_voice_ctx_cache", None)
+        if cache is None:
+            cache = self._voice_ctx_cache = {}
+        cached_turns = cache.get(session_id)
+        if cached_turns:
+            memory_context = self.recaller.format_context(cached_turns)
+        else:
+            try:
+                recent = await _asyncio.wait_for(
+                    _asyncio.to_thread(self.st_store.recent, user_id, session_id, 6),
+                    timeout=0.6,
+                )
+                if recent:
+                    memory_context = self.recaller.format_context(recent)
+                    cache[session_id] = list(recent)
+            except _asyncio.TimeoutError:
+                logger.warning("voice: first-turn memory fetch slow (>0.6s) — proceeding")
+            except Exception as e:
+                logger.debug(f"voice: memory fetch failed (non-fatal): {e}")
+        t_mem_done = time.perf_counter()
+
+        # ── 2) Route + fetch grounded data from the real tools ──
+        # The voice path is no longer a bare LLM. We run the SAME router the
+        # text path uses, and for data questions (doctors, bookings, RAG, web)
+        # we call the REAL tool and feed its output to the synthesis LLM below.
+        # That is what stops voice from inventing doctor names and times.
+        # Greetings / small talk route to "direct" and skip the tools, so they
+        # stay fast. memory_context is passed to the router so follow-ups like
+        # "book the first one" / "their timings" resolve to the right referent.
+        tool_output = ""
+        route = "direct"
+        try:
+            decision = await self.router.aroute(user_message, memory_context)
+            primary = (decision.decisions[0]
+                       if getattr(decision, "decisions", None) else None)
+            route = (primary.route if primary else "direct") or "direct"
+            if route in ("crm", "rag", "web_search") and primary is not None:
+                tool_output = await self._voice_dispatch_tool(
+                    primary, patient_id=user_id, fallback_query=user_message,
+                )
+        except Exception as e:  # noqa: BLE001 — routing must never break the call
+            logger.warning(f"voice: routing/tool dispatch failed (non-fatal): {e}")
+        t_route_done = time.perf_counter()
+
+        # ── 3) Build the voice-shaped prompt (grounded when a tool ran) ──
+        system = (
+            "You are the Nawaloka Hospital voice assistant on a live phone "
+            "call. Keep replies short, warm, conversational — under three "
+            "sentences. No markdown, no tables, no bullet points, no asterisks. "
+            "The caller is listening, not reading; read names and numbers "
+            "naturally.\n\n"
+            "Conversation rules:\n"
+            "- STAY on the department, doctor, or appointment the caller is "
+            "currently discussing. Do NOT switch to a different department or "
+            "list unrelated doctors unless the caller explicitly asks.\n"
+            "- Before you confirm a booking, you must know BOTH a specific "
+            "doctor AND a date and time. If either is missing, ASK for it — "
+            "never pick a doctor or time on the caller's behalf.\n"
+            "- When the caller corrects you ('no, not that one', 'I meant X'), "
+            "use the correction and the recent conversation to figure out who "
+            "or what they mean before acting.\n"
+            "- If the information below doesn't answer the question, say so in "
+            "one short sentence and offer the main line +94 11 544 4444 or to "
+            "connect them — never invent doctors, times, departments, or facts.\n\n"
+            "Hospital quick facts (these are correct — use them for general "
+            "questions about hours and contact):\n"
+            "- The hospital is open 24 hours a day, every day, for emergency care.\n"
+            "- The Outpatient Department (OPD) is open 7:00 am to 10:00 pm "
+            "(07:00 to 22:00).\n"
+            "- Specialist consultant appointments are by appointment, usually "
+            "in the afternoon and evening.\n"
+            "- Main hospital phone number: +94 11 544 4444.\n"
+            "Use these quick facts ONLY for general hours/contact questions; "
+            "for doctors, appointments, and bookings always use the INFORMATION "
+            "block below (the live system), never these.\n\n"
+        )
+        if tool_output:
+            system += (
+                "Answer using ONLY the information below — it is the live source "
+                "of truth from the hospital's systems. Do NOT invent doctor "
+                "names, times, departments, or booking details. If it does not "
+                "contain the answer, say you don't have that detail and offer to "
+                "help another way.\n\n"
+                f"=== INFORMATION ===\n{tool_output}\n\n"
+            )
+        system += f"=== RECENT CONVERSATION ===\n{memory_context}"
+        messages = [
+            SystemMessage(content=system),
+            HumanMessage(content=user_message),
+        ]
+        t_prompt_built = time.perf_counter()
+
+        # ── 3) Stream tokens from the fast LLM ──
+        llm = self.llm_fast or self.llm_chat
+        answer_parts: list[str] = []
+        running = ""
+        t_first_chunk: float | None = None
+        was_cancelled = False
+
+        try:
+            async for chunk in llm.astream(messages):
+                content = getattr(chunk, "content", None)
+                if not content:
+                    continue
+                if t_first_chunk is None:
+                    t_first_chunk = time.perf_counter()
+                    logger.info(
+                        "⏱  achat_stream_fast: "
+                        f"mem={int((t_mem_done - t_mem_start) * 1000)}ms, "
+                        f"route+tool={int((t_route_done - t_mem_done) * 1000)}ms (route={route}), "
+                        f"prompt={int((t_prompt_built - t_route_done) * 1000)}ms, "
+                        f"pre_llm_total={int((t_prompt_built - t_start) * 1000)}ms, "
+                        f"first_llm_chunk={int((t_first_chunk - t_prompt_built) * 1000)}ms"
+                    )
+                answer_parts.append(content)
+                running += content
+                yield ("token", content)
+                yield ("partial", running)
+                await _asyncio.sleep(0)
+        except _asyncio.CancelledError:
+            # Barge-in. The caller has already received our partials;
+            # they know exactly what was said. Fall through to the
+            # finally block which persists that partial answer.
+            was_cancelled = True
+            logger.info(
+                f"voice: cancelled mid-stream after "
+                f"{int((time.perf_counter() - t_start) * 1000)} ms "
+                f"({len(answer_parts)} chunks, "
+                f"{len(running)} chars spoken so far)"
+            )
+
+        answer_final = "".join(answer_parts).strip()
+        latency = int((time.perf_counter() - t_start) * 1000)
+
+        # ── 4) Persist the turn in the background ──
+        # On a clean run, save the full answer.
+        # On barge-in, save the PARTIAL answer (what was actually played)
+        # so the agent's recollection matches the user's experience.
+        # Always off-thread so the post-turn save doesn't park the loop
+        # while the next turn is trying to start.
+        if answer_final:
+            await self._save_voice_turn_async(
+                user_id=user_id,
+                session_id=session_id,
+                user_message=user_message,
+                assistant_message=answer_final,
+                was_interrupted=was_cancelled,
+            )
+
+        # If we were cancelled, do NOT yield "final" — the consumer
+        # already handled the cancellation via the async-generator
+        # contract.
+        if was_cancelled:
+            return
+
+        yield (
+            "final",
+            AgentResponse(
+                answer=answer_final,
+                route="voice_fast",
+                routes=["voice_fast"],
+                action=None,
+                tool_output="",
+                memory_context=memory_context,
+                latency_ms=latency,
+            ),
+        )
+
+    # ── Voice tool dispatch ─────────────────────────────────────
+
+    async def _voice_dispatch_tool(self, decision, *, patient_id, fallback_query=""):
+        """Run the tool for a voice ``RouteDecision`` — mirrors the text
+        path's ``_dispatch_tool`` so voice answers are grounded in the SAME
+        live data (CRM / RAG / web) instead of being invented by a bare LLM.
+
+        Returns the tool's plain-text output (the synthesis prompt then feeds
+        it to the LLM as the source of truth). Never raises — on any failure
+        it returns ``""`` and the caller falls back to an ungrounded reply.
+        """
+        import asyncio as _asyncio
+        route = getattr(decision, "route", "direct")
+        params = dict(getattr(decision, "params", None) or {})
+        try:
+            if route == "crm" and self.crm_tool is not None:
+                action = getattr(decision, "action", None) or "lookup_patient"
+                # Self-referential CRM actions get the caller's patient_id when
+                # the router didn't extract one (e.g. "cancel my appointment").
+                if action in {"lookup_patient", "create_booking",
+                              "cancel_booking", "reschedule_booking"}:
+                    params.setdefault("patient_id", patient_id)
+                return await _asyncio.to_thread(self.crm_tool.dispatch, action, params)
+            if route == "rag" and self.rag_tool is not None:
+                if not params.get("query") and fallback_query:
+                    params["query"] = fallback_query
+                return await _asyncio.to_thread(self.rag_tool.dispatch, "search", params)
+            if route == "web_search" and self.web_tool is not None:
+                if not params.get("query") and fallback_query:
+                    params["query"] = fallback_query
+                return await _asyncio.to_thread(self.web_tool.dispatch, "search", params)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"voice: tool dispatch ({route}) failed: {e}")
+        return ""
+
+    # ── Voice memory persistence ────────────────────────────────
+
+    async def _save_voice_turn_async(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        user_message: str,
+        assistant_message: str,
+        was_interrupted: bool,
+    ) -> None:
+        """Persist a voice turn to short-term + (eventually) long-term
+        memory. Runs off-thread (so it never parks the event loop) but is
+        AWAITED to completion so the write can't be dropped when the call's
+        loop tears down on hang-up.
+
+        The flow mirrors what the full ``store_and_distill_node`` does
+        for the text path — but it never blocks TTS or the next turn.
+
+        For barge-in turns we tag the stored assistant message with a
+        ``[interrupted]`` marker so downstream distillation knows it
+        was cut short and shouldn't extract long-term facts from it.
+        """
+        import asyncio as _asyncio
+
+        # Tag interrupted assistant utterances so distillation can skip
+        # them. The marker is invisible to the LLM in subsequent turns
+        # because we strip it during context formatting if needed.
+        stored_assistant = (
+            f"[interrupted] {assistant_message}"
+            if was_interrupted and assistant_message
+            else assistant_message
+        )
+
+        def _do_save():
+            try:
+                now = time.time()
+                self.st_store.add(
+                    user_id, session_id,
+                    ConversationTurn(
+                        user_id=user_id, session_id=session_id,
+                        role="user", content=user_message, ts=now,
+                    ),
+                )
+                self.st_store.add(
+                    user_id, session_id,
+                    ConversationTurn(
+                        user_id=user_id, session_id=session_id,
+                        role="assistant", content=stored_assistant, ts=now,
+                    ),
+                )
+                # Keep the per-call in-memory context fresh so the NEXT turn
+                # gets memory INSTANTLY (no Supabase round-trip) — this is what
+                # keeps voice latency low across a conversation.
+                try:
+                    _cache = getattr(self, "_voice_ctx_cache", None)
+                    if _cache is None:
+                        _cache = self._voice_ctx_cache = {}
+                    _turns = list(_cache.get(session_id) or [])
+                    _turns.append(ConversationTurn(
+                        user_id=user_id, session_id=session_id,
+                        role="user", content=user_message, ts=now))
+                    _turns.append(ConversationTurn(
+                        user_id=user_id, session_id=session_id,
+                        role="assistant", content=stored_assistant, ts=now))
+                    _cache[session_id] = _turns[-6:]
+                except Exception:
+                    pass
+                # Materialise a chat_sessions row so the call appears in
+                # the UI sidebar (the "voice-" session_id prefix is the
+                # marker the frontend uses to split voice from text).
+                # Use the SAME working Supabase session that just saved the
+                # turns — NOT touch_session_sync(), whose get_sql_engine()
+                # is unreliable inside the voice-worker process and silently
+                # failed there, leaving voice calls invisible in the sidebar.
+                try:
+                    from infrastructure.db.crm_models import ChatSession
+                    sess = self.st_store.supabase_session_factory()
+                    try:
+                        now_i = int(now)
+                        row = sess.get(ChatSession, session_id)
+                        if row is None:
+                            sess.add(ChatSession(
+                                session_id=session_id,
+                                patient_id=user_id,
+                                title=((user_message or "").strip()[:48] or "Voice call"),
+                                last_message_at=now_i,
+                                created_at=now_i,
+                                updated_at=now_i,
+                                archived=0,
+                            ))
+                        else:
+                            row.last_message_at = now_i
+                            row.updated_at = now_i
+                        sess.commit()
+                    finally:
+                        sess.close()
+                except Exception as e:
+                    logger.warning(f"voice: session header create failed: {e}")
+
+                # Auto-title after a few turns of real content. Only fires
+                # once per session (the helper checks if the title is
+                # still the default before doing the LLM call).
+                try:
+                    from api.routers.chat_sessions import maybe_auto_title_sync
+                    maybe_auto_title_sync(
+                        session_id=session_id,
+                        user_id=user_id,
+                        st_store=self.st_store,
+                        llm=self.llm_fast or self.llm_chat,
+                    )
+                except Exception as e:
+                    logger.debug(f"voice: auto-title failed (non-fatal): {e}")
+                # Long-term distillation — only on clean (un-interrupted)
+                # turns, and only when there's enough new conversation
+                # for the distiller's heuristics to extract a useful
+                # fact.
+                if not was_interrupted:
+                    try:
+                        recent = self.st_store.recent(user_id, session_id, k=5)
+                        if self.distiller.should_distill(recent):
+                            logger.debug(
+                                f"voice: distilling LT facts for {user_id}"
+                            )
+                            self.distiller.distill(user_id, recent)
+                    except Exception as e:
+                        logger.debug(
+                            f"voice: distillation failed (non-fatal): {e}"
+                        )
+            except Exception as e:
+                logger.warning(f"voice: memory write failed: {e}")
+
+        # Run the save to COMPLETION: off-thread (so the event loop isn't
+        # blocked by the DB write) but AWAITED so it can't be dropped when
+        # the call's loop tears down on hang-up. The previous version had a
+        # stray `yield` below this point that silently turned this whole
+        # method into a no-op generator — every voice turn was lost with no
+        # error. Awaiting also replaces the fire-and-forget create_task that
+        # could be cancelled mid-write.
+        try:
+            await _asyncio.to_thread(_do_save)
+        except Exception as e:
+            logger.warning(f"voice: save task failed: {e}")
+
+    # ── Async Streaming Entry Point (for Voice / LiveKit) ────────
+
+    async def achat_stream(
+        self,
+        user_message: str,
+        user_id: str,
+        session_id: str,
+    ):
+        """
+        Streaming variant of ``achat`` for the voice pipeline.
+
+        Yields ``(kind, payload)`` tuples:
+
+            ("token", str)        — a chunk of the assistant's text answer
+            ("final", AgentResponse) — emitted once, after the last token
+
+        The voice adapter (``LangGraphLLMAdapter``) consumes the tokens and
+        forwards each as a ``ChatChunk`` to LiveKit's TTS plugin, which begins
+        synthesising audio as soon as the first sentence-sized chunk arrives.
+        That cuts time-to-first-audio dramatically vs. waiting for the full
+        ``final_answer`` string.
+
+        Implementation note (Week 15 stage 1):
+
+            Today we run the graph to completion via ``ainvoke`` and then chunk
+            the final answer into sentence/phrase units, yielding each with a
+            small ``asyncio.sleep(0)`` so TTS can pipeline synthesis. This
+            preserves the multi-agent richness (router / fan-out / merge) and
+            keeps state behaviour identical to ``achat``.
+
+            Week 15 stage 2 (follow-up) replaces this with native
+            ``astream_events`` token streaming tagged ``voice_output`` on the
+            synthesiser node — first-token latency drops further. The adapter
+            interface stays unchanged.
+
+        Cancellation:
+
+            If the consumer cancels (LiveKit barge-in), the ``CancelledError``
+            propagates here and aborts the graph mid-flight.
+        """
+        import re
+        import asyncio as _asyncio
+
+        t0 = time.time()
+
+        initial_state = {
+            "messages": [HumanMessage(content=user_message)],
+            "user_id": user_id,
+            "session_id": session_id,
+            "agent_outputs": [],
+        }
+
+        # Run the graph to completion. Cancellation propagates through ainvoke.
+        final_state = await self.graph.ainvoke(initial_state)
+
+        latency = int((time.time() - t0) * 1000)
+
+        route_decisions = final_state.get("route_decisions", [])
+        all_routes = [d.get("route", "direct") for d in route_decisions]
+        primary = route_decisions[0] if route_decisions else {"route": "direct"}
+
+        answer = final_state.get("final_answer", "") or ""
+
+        # Chunk by sentence first, then by phrase if a sentence is long.
+        # This is the unit TTS will receive — keep them speakable.
+        # Pattern keeps the trailing punctuation with the sentence.
+        sentences = re.findall(r"[^.!?\n]+[.!?]?(?:\s+|$)", answer) or [answer]
+
+        for sentence in sentences:
+            if not sentence.strip():
+                continue
+            # For long sentences, sub-chunk on commas/semicolons to start TTS
+            # earlier. ~80 chars is a comfortable phrase length.
+            if len(sentence) > 80:
+                parts = re.split(r"(?<=[,;:])\s+", sentence)
+                for part in parts:
+                    if part.strip():
+                        yield ("token", part if part.endswith(" ") else part + " ")
+                        # Yield to the event loop so TTS can pull the chunk.
+                        await _asyncio.sleep(0)
+            else:
+                yield ("token", sentence)
+                await _asyncio.sleep(0)
+
+        # Emit the final AgentResponse for memory / observability bookkeeping.
+        yield (
+            "final",
+            AgentResponse(
+                answer=answer,
+                route=primary.get("route", "direct"),
+                routes=all_routes,
+                action=primary.get("action"),
+                tool_output=final_state.get("tool_output", ""),
+                memory_context=final_state.get("memory_context", ""),
+                latency_ms=latency,
+            ),
         )
 
 

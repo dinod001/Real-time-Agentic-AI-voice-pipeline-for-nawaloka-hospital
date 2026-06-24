@@ -1,0 +1,75 @@
+# =============================================================================
+# api — FastAPI service behind an ALB (Load Balanced Web Service)
+#
+# CPU/memory bumped from 256/512 → 1024/2048 because the orchestrator
+# bootstraps with torch + sentence-transformers + langchain + supabase +
+# qdrant connections (~1.5 GB minimum at boot). 512 MiB would OOM-kill
+# before /health ever returns.
+#
+# Tasks placed in PUBLIC subnets so they can reach the internet via the
+# IGW (no NAT GW needed). The ALB still front-doors them.
+#
+# Secrets pulled from SSM Parameter Store under /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/<KEY>.
+# These are populated by scripts/aws/push_secrets.sh before first deploy.
+# =============================================================================
+
+name: api
+type: Load Balanced Web Service
+
+http:
+  path: '/'
+  healthcheck:
+    path: '/health'
+    healthy_threshold: 2
+    unhealthy_threshold: 5
+    interval: 30s
+    timeout: 10s
+    grace_period: 120s        # lifespan warmup needs time on cold start
+
+image:
+  # Pre-built + pushed to ECR by scripts/aws/build_push_images.sh.
+  # We bypass Copilot's own `build:` because its docker-container builder
+  # can't read the build context from this Dropbox path (the 🚧 emoji in
+  # the absolute path breaks its context tarball). Building locally with
+  # the default docker driver + pushing works fine.
+  location: 310485117018.dkr.ecr.us-west-2.amazonaws.com/nawaloka/api:latest
+  port: 8000
+
+cpu: 1024            # 1 vCPU
+memory: 2048         # 2 GiB — enough for torch + langchain + qdrant + supabase
+platform: linux/arm64   # Graviton — native build on the M-series Mac, ~20% cheaper
+count: 2             # 2 replicas → demonstrates shared cache + queue across instances
+exec: true
+network:
+  connect: true
+  vpc:
+    placement: public
+
+variables:
+  REDIS_URL: redis://nawaloka-dev.dahd4w.0001.usw2.cache.amazonaws.com:6379/0
+  ARQ_WORKER_ENABLED: "true"
+  LOG_LEVEL: info
+  TIMEZONE: Asia/Colombo
+
+# Secrets pulled from SSM Parameter Store under /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/<KEY>.
+# Key on the left = env var name in the container.
+# Value on the right = parameter name in SSM.
+secrets:
+  SUPABASE_DB_URL:        /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/SUPABASE_DB_URL
+  SUPABASE_URL:           /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/SUPABASE_URL
+  SUPABASE_SERVICE_KEY:   /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/SUPABASE_SERVICE_KEY
+  QDRANT_URL:             /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/QDRANT_URL
+  QDRANT_API_KEY:         /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/QDRANT_API_KEY
+  GROQ_API_KEY:           /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/GROQ_API_KEY
+  OPENROUTER_API_KEY:     /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/OPENROUTER_API_KEY
+  OPENAI_API_KEY:         /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/OPENAI_API_KEY
+  ANTHROPIC_API_KEY:      /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/ANTHROPIC_API_KEY
+  TAVILY_API_KEY:         /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/TAVILY_API_KEY
+  LANGFUSE_PUBLIC_KEY:    /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/LANGFUSE_PUBLIC_KEY
+  LANGFUSE_SECRET_KEY:    /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/LANGFUSE_SECRET_KEY
+  LANGFUSE_BASE_URL:      /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/LANGFUSE_BASE_URL
+  LIVEKIT_URL:            /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/LIVEKIT_URL
+  LIVEKIT_API_KEY:        /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/LIVEKIT_API_KEY
+  LIVEKIT_API_SECRET:     /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/LIVEKIT_API_SECRET
+  DEEPGRAM_API_KEY:       /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/DEEPGRAM_API_KEY
+  ELEVEN_API_KEY:         /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/ELEVEN_API_KEY

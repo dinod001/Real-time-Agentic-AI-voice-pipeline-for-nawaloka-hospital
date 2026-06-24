@@ -1,0 +1,62 @@
+# =============================================================================
+# voice — LiveKit voice worker (Backend Service)
+#
+# Connects OUTBOUND to LiveKit Cloud over WebSocket. No public ingress.
+# Tasks live in public subnets so they can reach LiveKit + Deepgram +
+# ElevenLabs + Groq without paying NAT GW costs.
+#
+# 1 vCPU / 2 GiB — Silero VAD + STT/TTS streams + orchestrator wiring
+# need real memory. 512 MiB OOMs on first call.
+#
+# Pre-warming (warm_start in src/voice/agent.py) primes the LLM
+# connection pool at boot, so the first user call doesn't pay TLS cost.
+# =============================================================================
+
+name: voice
+type: Backend Service
+
+image:
+  location: 310485117018.dkr.ecr.us-west-2.amazonaws.com/nawaloka/voice:latest
+  # voice Dockerfile DOES install procps, so pgrep works here.
+  healthcheck:
+    command: ["CMD-SHELL", "pgrep -f voice.run >/dev/null || exit 1"]
+    interval: 30s
+    retries: 3
+    timeout: 5s
+    start_period: 90s
+
+cpu: 1024
+memory: 2048
+platform: linux/arm64
+count: 1                  # On-demand: scale via `copilot svc scale --name voice --count 0|1`
+exec: true
+network:
+  connect: true
+  vpc:
+    placement: public
+
+variables:
+  LOG_LEVEL: info
+  TIMEZONE: Asia/Colombo
+  # The voice worker doesn't need Redis directly — its memory writes go
+  # via the orchestrator's `_save_voice_turn_async` which calls
+  # `touch_session_sync` + `maybe_auto_title_sync` synchronously in a thread.
+
+secrets:
+  SUPABASE_DB_URL:        /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/SUPABASE_DB_URL
+  SUPABASE_URL:           /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/SUPABASE_URL
+  SUPABASE_SERVICE_KEY:   /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/SUPABASE_SERVICE_KEY
+  QDRANT_URL:             /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/QDRANT_URL
+  QDRANT_API_KEY:         /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/QDRANT_API_KEY
+  GROQ_API_KEY:           /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/GROQ_API_KEY
+  OPENROUTER_API_KEY:     /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/OPENROUTER_API_KEY
+  OPENAI_API_KEY:         /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/OPENAI_API_KEY
+  ANTHROPIC_API_KEY:      /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/ANTHROPIC_API_KEY
+  LANGFUSE_PUBLIC_KEY:    /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/LANGFUSE_PUBLIC_KEY
+  LANGFUSE_SECRET_KEY:    /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/LANGFUSE_SECRET_KEY
+  LANGFUSE_BASE_URL:      /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/LANGFUSE_BASE_URL
+  LIVEKIT_URL:            /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/LIVEKIT_URL
+  LIVEKIT_API_KEY:        /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/LIVEKIT_API_KEY
+  LIVEKIT_API_SECRET:     /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/LIVEKIT_API_SECRET
+  DEEPGRAM_API_KEY:       /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/DEEPGRAM_API_KEY
+  ELEVEN_API_KEY:         /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/ELEVEN_API_KEY

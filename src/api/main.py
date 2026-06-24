@@ -30,11 +30,13 @@ Docs:
 
 import asyncio
 import os
+import pathlib
 import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 # Ensure src/ is on the path regardless of launch cwd
@@ -50,6 +52,7 @@ from api.routers import chat as chat_router
 from api.routers import chat_sessions as chat_sessions_router
 from api.routers import health as health_router
 from api.routers import patients as patients_router
+from api.routers import voice as voice_router
 from api.routers.tools import cag as cag_router
 from api.routers.tools import crawl as crawl_router
 from api.routers.tools import crm as crm_router
@@ -332,6 +335,47 @@ app.add_middleware(
 install_middleware(app)
 
 
+# ── SPA ⇄ API path bridge ─────────────────────────────────────────────
+# The React SPA (served at /) calls the backend over relative ``/api/*``
+# paths — that's how the Vite dev proxy is configured, and keeping the
+# same convention in production means the browser hits a single origin
+# (no CORS, one ALB hostname). The real API routes have no ``/api``
+# prefix (``/chat``, ``/voice/token`` …), so this middleware strips the
+# leading ``/api`` before routing. Runs before the router, so the rewrite
+# is transparent to every endpoint.
+@app.middleware("http")
+async def _strip_api_prefix(request, call_next):
+    path = request.scope.get("path", "")
+    if path == "/api" or path == "/api/":
+        request.scope["path"] = "/"
+        request.scope["raw_path"] = b"/"
+    elif path.startswith("/api/"):
+        new_path = path[4:]  # drop the leading "/api"
+        request.scope["path"] = new_path
+        request.scope["raw_path"] = new_path.encode("utf-8")
+    return await call_next(request)
+
+
+# Keep browsers from serving stale dynamic content. Two cases:
+#   - HTML (the SPA index) → ``no-cache`` so a freshly deployed bundle hash
+#     is always picked up on the next load. A cached index.html was pinning
+#     users to an old JS bundle.
+#   - JSON (every API response) → ``no-store`` so the live session list /
+#     patient data is never cached; the sidebar always reflects the DB. A
+#     cached empty session-list response was the root cause of a sidebar
+#     that looked permanently empty while the database had the data.
+# Hashed JS/CSS assets are immutable, so they are left cacheable.
+@app.middleware("http")
+async def _cache_control(request, call_next):
+    response = await call_next(request)
+    ctype = response.headers.get("content-type", "")
+    if ctype.startswith("text/html"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    elif ctype.startswith("application/json"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 # ── Routers ──────────────────────────────────────────────────────────
 
 app.include_router(health_router.router)
@@ -344,14 +388,29 @@ app.include_router(web_router.router)
 app.include_router(cag_router.router)
 app.include_router(memory_router.router)
 app.include_router(crawl_router.router)
+app.include_router(voice_router.router)
 
 
-@app.get("/", tags=["System"])
-async def root():
-    """Friendly landing page pointer."""
-    return {
-        "service": "Nawaloka Health Assistant API",
-        "version": app.version,
-        "docs": "/docs",
-        "redoc": "/redoc",
-    }
+# ── SPA static files ──────────────────────────────────────────────────
+# In the container the compiled React build lives at /app/ui_dist (copied
+# by docker/api/Dockerfile from the Stage-0 node build). __file__ is
+# /app/src/api/main.py, so parents[2] == /app. When the build is present
+# we mount it at / with ``html=True`` so "/" serves index.html and
+# /assets/* serve the bundles. This mount is registered LAST, so every
+# real route (/chat, /health, /docs, …) is matched first; only unmatched
+# paths fall through to the SPA. Locally (no build) we keep a JSON root.
+_UI_DIST = pathlib.Path(__file__).resolve().parents[2] / "ui_dist"
+
+if _UI_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=str(_UI_DIST), html=True), name="spa")
+    logger.info("SPA mounted from {}", _UI_DIST)
+else:
+    @app.get("/", tags=["System"])
+    async def root():
+        """Friendly landing page pointer (no SPA build present)."""
+        return {
+            "service": "Nawaloka Health Assistant API",
+            "version": app.version,
+            "docs": "/docs",
+            "redoc": "/redoc",
+        }

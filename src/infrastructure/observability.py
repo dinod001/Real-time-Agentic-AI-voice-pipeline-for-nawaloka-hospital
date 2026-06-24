@@ -200,13 +200,27 @@ def prefetch_prompts(names) -> int:
 # @observe decorator (re-export from langfuse — v3 API)
 # ---------------------------------------------------------------------------
 
+_lf_observe = None
+_get_lf_client = None
 try:
-    from langfuse import observe as _lf_observe
-    from langfuse import get_client as _get_lf_client
+    # langfuse v3+: top-level export
+    from langfuse import observe as _lf_observe  # type: ignore
+    from langfuse import get_client as _get_lf_client  # type: ignore
 except ImportError:
-    _lf_observe = None
-    _get_lf_client = None
-    logger.debug("langfuse package not installed — @observe is a no-op.")
+    try:
+        # langfuse v2: lived under .decorators / .openai_integration
+        from langfuse.decorators import observe as _lf_observe  # type: ignore
+        try:
+            from langfuse import Langfuse as _LangfuseV2  # type: ignore
+            _get_lf_client = _LangfuseV2  # call-site does _get_lf_client()
+        except ImportError:
+            _get_lf_client = None
+        logger.warning(
+            "Detected langfuse<3. Tracing will work but please upgrade: "
+            "pip install --upgrade 'langfuse>=3.0.0'"
+        )
+    except ImportError:
+        logger.debug("langfuse package not installed — @observe is a no-op.")
 
 
 def observe(

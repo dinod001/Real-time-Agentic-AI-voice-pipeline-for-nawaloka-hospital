@@ -290,7 +290,7 @@ CONTEXT
 INTENT MAP
   Greeting / pleasantry / chitchat        → direct
   Anything about the user's appointments   → crm
-  Anything about doctor availability       → crm/search_doctors
+  Anything about doctor availability       → crm (action: search_doctors)
   Hospital policy / clinical info / FAQ    → rag
   Hospital opening / visiting / parking    → rag (it's in the KB).
   Truly live external info (today's traffic, weather, news) → web_search

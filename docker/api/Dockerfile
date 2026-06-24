@@ -16,6 +16,21 @@
 # if you need the crawler in production.
 # =============================================================================
 
+# ── Stage 0 ── build the React/Vite SPA ──────────────────────────────────────
+# The frontend is served by FastAPI itself (same ALB, same hostname). We build
+# it here so the api image is fully self-contained: one URL serves both the SPA
+# (at /) and the API (under /api/*, stripped to the real routes by middleware).
+# ui/node_modules + ui/dist are .dockerignore'd, so this builds clean from source.
+FROM node:20-slim AS webbuilder
+WORKDIR /web
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci
+COPY ui/ ./
+# In production the SPA talks to the backend over relative /api/* paths
+# (same origin), so no VITE_API_URL is needed at build time.
+RUN npm run build          # → /web/dist
+
+
 # ── Stage 1 ── build deps ────────────────────────────────────────────────────
 FROM python:3.13-slim AS builder
 
@@ -70,9 +85,19 @@ COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
 
 # Application code only — no tests/notebooks/data baked into the image.
+# Note: sql/ is deliberately NOT copied. Those files are one-time DB
+# schema + seed scripts (scripts/init_supabase.py + seed_*.py) run
+# separately against an already-provisioned Supabase. The running
+# api/worker services never read them at runtime. Keeps the image
+# smaller and avoids a buildx context quirk with the sql/ directory
+# in this Dropbox-hosted repo.
 COPY src    ./src
 COPY config ./config
-COPY sql    ./sql
+
+# The compiled SPA from Stage 0. FastAPI serves it at / (see api/main.py:
+# StaticFiles mount + /api path-strip middleware). Lives at /app/ui_dist so
+# main.py can resolve it as parents[2]/ui_dist relative to src/api/main.py.
+COPY --from=webbuilder /web/dist ./ui_dist
 
 # Quick liveness check; lifespan warmup can take 30-60 s on a cold start
 # while the local sentence-transformers model loads, so give it a buffer.

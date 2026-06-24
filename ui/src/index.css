@@ -3,55 +3,86 @@
 @tailwind utilities;
 
 @layer base {
-  html, body, #root {
+
+  html,
+  body,
+  #root {
     height: 100%;
   }
+
   body {
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    background-image: radial-gradient(circle at top, rgba(30, 27, 75, 0.4) 0%, rgba(6, 8, 24, 0.9) 100%), url('/bg_wave.png');
+    background-size: 100vw 100vh;
+    background-repeat: no-repeat;
+    background-attachment: fixed;
+    background-color: #060818;
+    color: #f8fafc;
   }
+
   /* Scrollbar styling (webkit) */
-  ::-webkit-scrollbar { width: 10px; height: 10px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: #1f2937; border-radius: 8px; }
-  ::-webkit-scrollbar-thumb:hover { background: #374151; }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #1e1e2e;
+    border-radius: 8px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #2d2d44;
+  }
 }
 
 @layer components {
+
   /* Markdown tables inside assistant bubbles */
   .prose-invert table {
     @apply w-full border-collapse my-2 text-xs;
   }
+
   .prose-invert th {
-    @apply text-left font-semibold text-slate-200 bg-bg-soft px-2 py-1.5 border border-border;
+    @apply text-left font-semibold text-slate-200 bg-bg-soft/80 px-2 py-1.5 border border-border;
   }
+
   .prose-invert td {
     @apply px-2 py-1.5 border border-border text-slate-300 align-top;
   }
+
   .prose-invert tr:nth-child(even) td {
     @apply bg-bg-soft/40;
   }
 
   .card {
-    @apply bg-bg-card border border-border rounded-xl;
+    @apply bg-bg-card/60 backdrop-blur-md border border-border rounded-xl shadow-lg;
   }
+
   .chip {
     @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium;
   }
+
   .btn {
-    @apply inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium
-           transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed;
   }
+
   .btn-primary {
-    @apply btn bg-brand-500 text-slate-900 hover:bg-brand-400;
+    @apply btn bg-gradient-to-r from-indigo-500 to-blue-600 text-white shadow-lg shadow-indigo-500/25 hover:from-indigo-400 hover:to-blue-500 hover:shadow-indigo-500/40 hover:-translate-y-0.5 border border-indigo-400/20;
   }
+
   .btn-ghost {
-    @apply btn bg-transparent text-slate-300 hover:bg-bg-soft;
+    @apply btn bg-transparent text-slate-300 hover:bg-white/5 hover:text-white;
   }
+
   .input {
-    @apply w-full bg-bg-soft border border-border rounded-lg px-3 py-2 text-sm
-           text-slate-100 placeholder-slate-500 outline-none focus:border-brand-500
-           transition-colors;
+    @apply w-full bg-bg-soft/50 backdrop-blur-md border border-border rounded-xl px-4 py-3 text-sm text-slate-200 placeholder-slate-500 outline-none focus:border-indigo-500 focus:bg-bg-soft/80 focus:shadow-[0_0_15px] focus:shadow-indigo-500/20 transition-all duration-300;
   }
+
   .kbd {
     @apply px-1.5 py-0.5 rounded text-[10px] bg-bg-soft border border-border font-mono text-slate-400;
   }

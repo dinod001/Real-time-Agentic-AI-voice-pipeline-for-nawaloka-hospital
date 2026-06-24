@@ -586,11 +586,29 @@ async def _run_chat_pipeline(
     cache_for_router = request.app.state.session_cache.get(
         _cache_key(req.user_id, req.session_id)
     )
+    recent_turns = []
     if cache_for_router is not None:
         recent_turns = (cache_for_router.get("st_turns") or [])[-4:]
-        router_context = agent.recaller.format_context(recent_turns)
-    else:
-        router_context = ""
+    if not recent_turns:
+        # Cold warm-cache: a DIFFERENT api replica handled the previous turn
+        # (the warm cache is per-task, in-memory), or no warmup ran. Without
+        # this fallback the router fires with ZERO history and can't resolve
+        # follow-ups — "what are their timings?", "cancel that one" — so it
+        # misroutes them (we saw "their timings" go to RAG and return
+        # radiology hours). The cache is a latency optimisation; this fetch
+        # guarantees the router always sees the conversation, so memory works
+        # no matter which replica serves the turn.
+        try:
+            live = await asyncio.to_thread(
+                st_store.recent, req.user_id, req.session_id, 4
+            )
+            recent_turns = live or []
+        except Exception as _e:  # noqa: BLE001
+            logger.debug(f"router-context fallback fetch failed: {_e}")
+            recent_turns = []
+    router_context = (
+        agent.recaller.format_context(recent_turns) if recent_turns else ""
+    )
 
     # Deterministic patient-profile hint. Two structured blocks are
     # injected ahead of the recent ST turns:
@@ -781,7 +799,16 @@ async def _run_chat_pipeline(
             req.message, OUT_OF_SCOPE_REPLY,
         )
         from api.routers.chat_sessions import touch_session_sync as _touch
+        from api.routers.chat_sessions import maybe_auto_title_sync as _autotitle
         background.add_task(_touch, req.user_id, req.session_id)
+        # Auto-title — fires once per session after enough turns.
+        background.add_task(
+            _autotitle,
+            session_id=req.session_id,
+            user_id=req.user_id,
+            st_store=st_store,
+            llm=getattr(agent, "llm_fast", None) or agent.llm_chat,
+        )
         timings["save"] = 0
 
         return ChatResponse(
@@ -831,7 +858,16 @@ async def _run_chat_pipeline(
             _store_turn_pair, st_store, req.user_id, req.session_id, req.message, answer,
         )
         from api.routers.chat_sessions import touch_session_sync as _touch
+        from api.routers.chat_sessions import maybe_auto_title_sync as _autotitle
         background.add_task(_touch, req.user_id, req.session_id)
+        # Auto-title — fires once per session after enough turns.
+        background.add_task(
+            _autotitle,
+            session_id=req.session_id,
+            user_id=req.user_id,
+            st_store=st_store,
+            llm=getattr(agent, "llm_fast", None) or agent.llm_chat,
+        )
         timings["save"] = 0
 
         return ChatResponse(
@@ -1013,7 +1049,16 @@ async def _run_chat_pipeline(
         background.add_task(_maybe_distill, agent.distiller, st_store, req.user_id, req.session_id)
         # Mark session as recently active (creates the row if missing).
         from api.routers.chat_sessions import touch_session_sync as _touch
+        from api.routers.chat_sessions import maybe_auto_title_sync as _autotitle
         background.add_task(_touch, req.user_id, req.session_id)
+        # Auto-title — fires once per session after enough turns.
+        background.add_task(
+            _autotitle,
+            session_id=req.session_id,
+            user_id=req.user_id,
+            st_store=st_store,
+            llm=getattr(agent, "llm_fast", None) or agent.llm_chat,
+        )
         # CAG-safe routes: single-route RAG (clinical KB) OR single-route
         # CRM where the action is patient-agnostic (hospital reference).
         cag_safe = (
@@ -1210,7 +1255,10 @@ async def session_turns(
     limit: int = 20,
     st_store=Depends(get_st_store),
 ) -> SessionTurnsResponse:
-    turns = await asyncio.to_thread(st_store.recent, user_id, session_id, limit)
+    # Use history() (no TTL filter) — this endpoint DISPLAYS a conversation
+    # in the sidebar, which must work for old sessions too. recent() hides
+    # turns past their 24h TTL and is only for the orchestrator's live context.
+    turns = await asyncio.to_thread(st_store.history, user_id, session_id, limit)
     items = [
         TurnItem(
             role=getattr(t, "role", "user"),
